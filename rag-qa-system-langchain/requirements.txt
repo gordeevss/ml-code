@@ -1,0 +1,9 @@
+fastapi
+uvicorn
+langchain_openai
+pymupdf
+langchain_text_splitters
+langchain_core
+langchain
+langgraph
+typing_extensions
