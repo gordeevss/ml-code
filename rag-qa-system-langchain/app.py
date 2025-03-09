@@ -1,6 +1,5 @@
 from fastapi import FastAPI
-from fastapi.responses import FileResponse
-from fastapi.responses import HTMLResponse
+from fastapi.responses import FileResponse, HTMLResponse
 
 from langchain import hub
 from langchain_openai import OpenAI
@@ -15,6 +14,9 @@ import pymupdf
 
 from typing_extensions import List, TypedDict
 
+# Global variable to store debug logs
+debug_logs = []
+
 class State(TypedDict):
     question: str
     context: List[Document]
@@ -26,24 +28,51 @@ def retrieve(state: State):
 
 def generate(state: State):
     docs_content = "\n\n".join(doc.page_content for doc in state["context"])
+    # Prepare the message using the prompt template
     messages = prompt.invoke({"question": state["question"], "context": docs_content})
+    # Call LLM to generate answer and capture debug info
     response = llm.invoke(messages)
+    debug_logs.append(
+        f"LLM Call: generate\nPrompt: {messages}\nResponse: {response}\n"
+    )
     return {"answer": response}
 
 file_path = 'static/CV.pdf'
+
+def check_question_relevance(q: str) -> bool:
+    """
+    Uses LLM to determine if the given question is related to Serhiy's professional skills.
+    Returns True if it is, otherwise False.
+    """
+    llm_check = OpenAI()
+    check_template = (
+        "You are an assistant in RAG application. The application only allows users to ask questions about Serhiy. "
+        "Determine if the following question is related to Serhiy, his professional "
+        "skills or professional background. "
+        "Answer with 'yes' if it is, otherwise answer 'no'. General questions about Serhiy is also acceptable. "
+        "\n\nQuestion: {question}"
+    )
+    check_prompt = PromptTemplate.from_template(check_template)
+    messages = check_prompt.invoke({"question": q})
+    response = llm_check.invoke(messages)
+    debug_logs.append(
+        f"LLM Call: check_question_relevance\nPrompt: {messages}\nResponse: {response}\n"
+    )
+    # Here we simply check if the answer starts with "yes" (ignoring case)
+    return response.strip().lower().startswith("yes")
 
 def run_llm_task(q: str = ''):
     pdf = pymupdf.open(file_path)
     doc = chr(12).join([page.get_text() for page in pdf])
 
-    text_splitter = RecursiveCharacterTextSplitter(chunk_size=100, chunk_overlap=20)
+    text_splitter = RecursiveCharacterTextSplitter(chunk_size=200, chunk_overlap=20)
     all_splits = text_splitter.create_documents([doc])
 
     embeddings = OpenAIEmbeddings(model="text-embedding-3-large")
 
     global vector_store
     vector_store = InMemoryVectorStore(embeddings)
-    document_ids = vector_store.add_documents(documents=all_splits)
+    vector_store.add_documents(documents=all_splits)
 
     global llm
     llm = OpenAI()
@@ -69,16 +98,24 @@ def run_llm_task(q: str = ''):
 
     return answer
 
-
 app = FastAPI()
 
 @app.get("/", response_class=HTMLResponse)
 async def read_root(q: str = ''):
+    # Clear previous debug logs
+    global debug_logs
+    debug_logs = []
+
     if q == '':
         answer = "You have to ask a question about Serhiy"
     else:
-        answer = run_llm_task(q)
+        # Check if the question is related to Serhiy's professional skills.
+        if not check_question_relevance(q):
+            answer = "The question does not seem to be about Serhiy or his professional skills. Please ask a relevant question."
+        else:
+            answer = run_llm_task(q)
 
+    debug_html = "<h3>Debug Info:</h3><pre>" + "\n".join(debug_logs) + "</pre>"
     html_content = f"""
     <!DOCTYPE html>
     <html lang="en">
@@ -89,10 +126,10 @@ async def read_root(q: str = ''):
     </head>
     <body>
         <h1>Ask something about Serhiy</h1>
-        <p>This is a simple RAG app which use Langchain, OpenAI API and FastAPI.</p>
+        <p>This is a simple RAG app which uses Langchain, OpenAI API and FastAPI.</p>
         <p>You can ask questions about Serhiy's CV</p>
         <p>CV is here: <a href="/cv/" target="_blank">download CV</a></p>
-        <p>Code is here: <a href="https://github.com/gordeevss/rag" target="_blank">https://github.com/gordeevss/rag</a></p>
+        <p>Code is here: <a href="https://github.com/gordeevss/ml-code/tree/main/rag-qa-system-langchain" target="_blank">https://github.com/gordeevss/ml-code/tree/main/rag-qa-system-langchain</a></p>
 
         <br>
 
@@ -104,7 +141,7 @@ async def read_root(q: str = ''):
         <p>{q}</p>
         <h3>Answer:</h3>
         <p>{answer}</p>
-        
+
     </body>
     </html>
     """
@@ -114,7 +151,6 @@ async def read_root(q: str = ''):
 @app.get("/cv/")
 async def download_file():
     return FileResponse(file_path, media_type='application/octet-stream', headers={"Content-Disposition": f"attachment; filename=CV.pdf"})
-    
 
 if __name__ == "__main__":
     import uvicorn
